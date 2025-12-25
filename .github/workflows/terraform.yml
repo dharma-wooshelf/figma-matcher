@@ -86,8 +86,8 @@ jobs:
             -var="public_key_path=/tmp/deploy_key.pub" \
             -var="github_repo=${{ env.TF_VAR_github_repo }}" \
             -var="key_name=${{ env.TF_VAR_key_name }}" \
-            -var="app_port=${{ env.TF_VAR_app_port:-8000 }}" \
-            -var="aws_region=${{ env.TF_VAR_aws_region:-us-east-1 }}" \
+            -var="app_port=${{ env.TF_VAR_app_port || '8000' }}" \
+            -var="aws_region=${{ env.TF_VAR_aws_region || 'us-east-1' }}" \
             -var="aws_access_key_id=${{ env.AWS_ACCESS_KEY_ID }}" \
             -var="aws_secret_access_key=${{ env.AWS_SECRET_ACCESS_KEY }}"
           terraform show -json plan.tfplan > plan.json || true
@@ -152,8 +152,8 @@ jobs:
             -var="public_key_path=/tmp/deploy_key.pub" \
             -var="github_repo=${{ env.TF_VAR_github_repo }}" \
             -var="key_name=${{ env.TF_VAR_key_name }}" \
-            -var="app_port=${{ env.TF_VAR_app_port:-8000 }}" \
-            -var="aws_region=${{ env.TF_VAR_aws_region:-us-east-1 }}" \
+            -var="app_port=${{ env.TF_VAR_app_port || '8000' }}" \
+            -var="aws_region=${{ env.TF_VAR_aws_region || 'us-east-1' }}" \
             -var="aws_access_key_id=${{ env.AWS_ACCESS_KEY_ID }}" \
             -var="aws_secret_access_key=${{ env.AWS_SECRET_ACCESS_KEY }}"
           terraform output -json > tf_outputs.json
