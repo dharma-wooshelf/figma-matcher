@@ -17,3 +17,10 @@ output "app_url" {
   description = "URL to reach the app"
   value       = "http://${aws_instance.web.public_ip}:${var.app_port}"
 }
+
+# NEW: output the ARN of the created secret (sensitive)
+output "aws_deploy_secret_arn" {
+  description = "ARN of the Secrets Manager secret created for deployment (if any)"
+  value       = length(aws_secretsmanager_secret.deploy) > 0 ? aws_secretsmanager_secret.deploy[0].arn : ""
+  sensitive   = true
+}

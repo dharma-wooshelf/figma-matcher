@@ -42,35 +42,49 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl jq
 
-      - name: Fetch secrets from Vault (AppRole)
-        id: vault
+      - name: Fetch non-sensitive variables from Terraform Cloud
         env:
-          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
-          VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
-          VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+          TF_CLOUD_TOKEN: ${{ secrets.TF_CLOUD_TOKEN }}
+          TF_CLOUD_ORG: ${{ secrets.TF_CLOUD_ORG }}
+          TF_CLOUD_WORKSPACE: ${{ secrets.TF_CLOUD_WORKSPACE }}
         run: |
-          if [ -n "$VAULT_ADDR" ]; then
-            resp=$(curl -s -X POST "$VAULT_ADDR/v1/auth/approle/login" -d "{\"role_id\":\"${VAULT_ROLE_ID}\",\"secret_id\":\"${VAULT_SECRET_ID}\"}")
-            token=$(echo "$resp" | jq -r '.auth.client_token // empty')
-            if [ -z "$token" ]; then echo "Vault login failed: $resp" && exit 1; fi
-            secret_json=$(curl -s -H "X-Vault-Token: $token" "$VAULT_ADDR/v1/secret/data/figma-web-matcher/ci")
-            export AWS_ACCESS_KEY_ID=$(echo "$secret_json" | jq -r '.data.data.AWS_ACCESS_KEY_ID // empty')
-            export AWS_SECRET_ACCESS_KEY=$(echo "$secret_json" | jq -r '.data.data.AWS_SECRET_ACCESS_KEY // empty')
-            export TF_PUB_KEY=$(echo "$secret_json" | jq -r '.data.data.TF_PUB_KEY // empty')
-            export TF_VAR_key_name=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_key_name // empty')
-            export TF_VAR_github_repo=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_github_repo // empty')
-            export TF_VAR_app_port=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_app_port // empty')
-            export TF_VAR_aws_region=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_aws_region // empty')
+          if [ -z "$TF_CLOUD_TOKEN" ] || [ -z "$TF_CLOUD_ORG" ] || [ -z "$TF_CLOUD_WORKSPACE" ]; then
+            echo "Terraform Cloud info not provided; skipping workspace variable fetch"
+            exit 0
+          fi
+          # get workspace id
+          ws_json=$(curl -sS -H "Authorization: Bearer $TF_CLOUD_TOKEN" \
+            "https://app.terraform.io/api/v2/organizations/$TF_CLOUD_ORG/workspaces/$TF_CLOUD_WORKSPACE")
+          workspace_id=$(echo "$ws_json" | jq -r '.data.id // empty')
+          if [ -z "$workspace_id" ]; then echo "failed to find workspace" && exit 1; fi
+          # fetch vars; export only non-sensitive values
+          vars_json=$(curl -sS -H "Authorization: Bearer $TF_CLOUD_TOKEN" \
+            "https://app.terraform.io/api/v2/workspaces/$workspace_id/vars")
+          echo "$vars_json" | jq -c '.data[] | {key:.attributes.key, value:.attributes.value, sensitive:.attributes.sensitive}' \
+            | while read -r entry; do
+              key=$(echo "$entry" | jq -r '.key')
+              value=$(echo "$entry" | jq -r '.value')
+              sensitive=$(echo "$entry" | jq -r '.sensitive')
+              if [ "$sensitive" = "false" ] && [ -n "$value" ]; then
+                echo "$key=$value" >> $GITHUB_ENV
+              fi
+            done
+          # if TF_PUB_KEY provided in workspace as non-sensitive, write deploy key
+          if [ -n "${TF_PUB_KEY:-}" ]; then
             echo "$TF_PUB_KEY" > /tmp/deploy_key.pub
-            echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> $GITHUB_ENV
-            echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> $GITHUB_ENV
-            echo "TF_VAR_key_name=$TF_VAR_key_name" >> $GITHUB_ENV
-            echo "TF_VAR_github_repo=$TF_VAR_github_repo" >> $GITHUB_ENV
-            echo "TF_VAR_app_port=$TF_VAR_app_port" >> $GITHUB_ENV
-            echo "TF_VAR_aws_region=$TF_VAR_aws_region" >> $GITHUB_ENV
-          else
-            echo "VAULT_ADDR not set; aborting"
-            exit 1
+          fi
+
+      - name: Ensure AWS creds available (fallback to GitHub Secrets)
+        run: |
+          if [ -z "${{ env.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          fi
+          if [ -z "${{ env.AWS_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          fi
+          # write pub key from secret if present
+          if [ -z "$(cat /tmp/deploy_key.pub 2>/dev/null || true)" ] && [ -n "${{ secrets.TF_PUB_KEY }}" ]; then
+            echo "${{ secrets.TF_PUB_KEY }}" > /tmp/deploy_key.pub
           fi
 
       - name: Setup Terraform
@@ -114,30 +128,41 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl jq
 
-      - name: Fetch secrets from Vault (AppRole)
+      - name: Fetch non-sensitive variables from Terraform Cloud
         env:
-          VAULT_ADDR: ${{ secrets.VAULT_ADDR }}
-          VAULT_ROLE_ID: ${{ secrets.VAULT_ROLE_ID }}
-          VAULT_SECRET_ID: ${{ secrets.VAULT_SECRET_ID }}
+          TF_CLOUD_TOKEN: ${{ secrets.TF_CLOUD_TOKEN }}
+          TF_CLOUD_ORG: ${{ secrets.TF_CLOUD_ORG }}
+          TF_CLOUD_WORKSPACE: ${{ secrets.TF_CLOUD_WORKSPACE }}
         run: |
-          resp=$(curl -s -X POST "$VAULT_ADDR/v1/auth/approle/login" -d "{\"role_id\":\"${VAULT_ROLE_ID}\",\"secret_id\":\"${VAULT_SECRET_ID}\"}")
-          token=$(echo "$resp" | jq -r '.auth.client_token // empty')
-          if [ -z "$token" ]; then echo "Vault login failed: $resp" && exit 1; fi
-          secret_json=$(curl -s -H "X-Vault-Token: $token" "$VAULT_ADDR/v1/secret/data/figma-web-matcher/ci")
-          export AWS_ACCESS_KEY_ID=$(echo "$secret_json" | jq -r '.data.data.AWS_ACCESS_KEY_ID // empty')
-          export AWS_SECRET_ACCESS_KEY=$(echo "$secret_json" | jq -r '.data.data.AWS_SECRET_ACCESS_KEY // empty')
-          export TF_PUB_KEY=$(echo "$secret_json" | jq -r '.data.data.TF_PUB_KEY // empty')
-          export TF_VAR_key_name=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_key_name // empty')
-          export TF_VAR_github_repo=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_github_repo // empty')
-          export TF_VAR_app_port=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_app_port // empty')
-          export TF_VAR_aws_region=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_aws_region // empty')
-          echo "$TF_PUB_KEY" > /tmp/deploy_key.pub
-          echo "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID" >> $GITHUB_ENV
-          echo "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY" >> $GITHUB_ENV
-          echo "TF_VAR_key_name=$TF_VAR_key_name" >> $GITHUB_ENV
-          echo "TF_VAR_github_repo=$TF_VAR_github_repo" >> $GITHUB_ENV
-          echo "TF_VAR_app_port=$TF_VAR_app_port" >> $GITHUB_ENV
-          echo "TF_VAR_aws_region=$TF_VAR_aws_region" >> $GITHUB_ENV
+          if [ -n "$TF_CLOUD_TOKEN" ] && [ -n "$TF_CLOUD_ORG" ] && [ -n "$TF_CLOUD_WORKSPACE" ]; then
+            ws_json=$(curl -sS -H "Authorization: Bearer $TF_CLOUD_TOKEN" \
+              "https://app.terraform.io/api/v2/organizations/$TF_CLOUD_ORG/workspaces/$TF_CLOUD_WORKSPACE")
+            workspace_id=$(echo "$ws_json" | jq -r '.data.id // empty')
+            if [ -z "$workspace_id" ]; then echo "failed to find workspace" && exit 1; fi
+            vars_json=$(curl -sS -H "Authorization: Bearer $TF_CLOUD_TOKEN" \
+              "https://app.terraform.io/api/v2/workspaces/$workspace_id/vars")
+            echo "$vars_json" | jq -c '.data[] | {key:.attributes.key, value:.attributes.value, sensitive:.attributes.sensitive}' \
+              | while read -r entry; do
+                key=$(echo "$entry" | jq -r '.key')
+                value=$(echo "$entry" | jq -r '.value')
+                sensitive=$(echo "$entry" | jq -r '.sensitive')
+                if [ "$sensitive" = "false" ] && [ -n "$value" ]; then
+                  echo "$key=$value" >> $GITHUB_ENV
+                fi
+              done
+            if [ -n "${TF_PUB_KEY:-}" ]; then
+              echo "$TF_PUB_KEY" > /tmp/deploy_key.pub
+            fi
+          fi
+          if [ -z "$(cat /tmp/deploy_key.pub 2>/dev/null || true)" ] && [ -n "${{ secrets.TF_PUB_KEY }}" ]; then
+            echo "${{ secrets.TF_PUB_KEY }}" > /tmp/deploy_key.pub
+          fi
+          if [ -z "${{ env.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          fi
+          if [ -z "${{ env.AWS_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          fi
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2

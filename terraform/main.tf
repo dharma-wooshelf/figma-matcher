@@ -40,6 +40,23 @@ resource "aws_security_group" "sg" {
   }
 }
 
+# NEW: store deployment secret in AWS Secrets Manager (optional - only created when aws_deploy_secret provided)
+resource "aws_secretsmanager_secret" "deploy" {
+  count = var.aws_deploy_secret != "" ? 1 : 0
+  name  = var.aws_deploy_secret_name
+  description = "Deployment secret for figma-web-matcher"
+  tags = {
+    ManagedBy = "terraform"
+    Project   = "figma-web-matcher"
+  }
+}
+
+resource "aws_secretsmanager_secret_version" "deploy_version" {
+  count       = var.aws_deploy_secret != "" ? 1 : 0
+  secret_id   = aws_secretsmanager_secret.deploy[0].id
+  secret_string = var.aws_deploy_secret
+}
+
 resource "aws_instance" "web" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
