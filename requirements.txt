@@ -1,0 +1,10 @@
+
+fastapi
+uvicorn
+playwright
+opencv-python
+numpy
+requests
+httpx
+beautifulsoup4
+lxml

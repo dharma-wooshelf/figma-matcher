@@ -1,0 +1,138 @@
+image: hashicorp/terraform:1.5.7
+
+stages:
+  - validate
+  - plan
+  - apply
+
+variables:
+  TF_DATA_DIR: ".terraform"
+  TERRAFORM_DIR: "terraform"
+
+before_script:
+  - mkdir -p "$CI_PROJECT_DIR/tmp"
+  - cd "$CI_PROJECT_DIR/$TERRAFORM_DIR"
+
+# helper function to login to Vault and export secrets (AppRole)
+# required CI variables: VAULT_ADDR, VAULT_ROLE_ID, VAULT_SECRET_ID (protected)
+# secrets path used: secret/data/figma-web-matcher/ci
+.fetch_vault_secrets: &fetch_vault_secrets |
+  (apk --no-cache add curl jq) || (apt-get update && apt-get install -y curl jq) || true
+  if [ -n "$VAULT_ADDR" ]; then
+    resp=$(curl -s -X POST "$VAULT_ADDR/v1/auth/approle/login" -d "{\"role_id\":\"${VAULT_ROLE_ID}\",\"secret_id\":\"${VAULT_SECRET_ID}\"}")
+    token=$(echo "$resp" | jq -r '.auth.client_token // empty')
+    if [ -z "$token" ]; then echo "Vault login failed: $resp" && exit 1; fi
+    export VAULT_TOKEN="$token"
+    secret_json=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/figma-web-matcher/ci")
+    export AWS_ACCESS_KEY_ID=$(echo "$secret_json" | jq -r '.data.data.AWS_ACCESS_KEY_ID // empty')
+    export AWS_SECRET_ACCESS_KEY=$(echo "$secret_json" | jq -r '.data.data.AWS_SECRET_ACCESS_KEY // empty')
+    export TF_PUB_KEY=$(echo "$secret_json" | jq -r '.data.data.TF_PUB_KEY // empty')
+    export TF_VAR_key_name=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_key_name // empty')
+    export TF_VAR_github_repo=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_github_repo // empty')
+    export TF_VAR_app_port=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_app_port // empty')
+    export TF_VAR_aws_region=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_aws_region // empty')
+    echo "$TF_PUB_KEY" > /tmp/deploy_key.pub
+  else
+    echo "VAULT_ADDR not set; skipping Vault fetch"
+  fi
+
+terraform_validate:
+  stage: validate
+  script:
+    - terraform init -input=false
+    - terraform validate
+  rules:
+    - when: always
+
+terraform_plan:
+  stage: plan
+  script:
+    - |
+      # fetch secrets from Vault and export env vars for terraform
+      <<'BASH'
+      ${FETCH_CMD}
+      BASH
+    - terraform init -input=false
+    - terraform plan -input=false -out=plan.tfplan \
+        -var="public_key_path=/tmp/deploy_key.pub" \
+        -var="github_repo=${TF_VAR_github_repo}" \
+        -var="key_name=${TF_VAR_key_name}" \
+        -var="app_port=${TF_VAR_app_port:-8000}" \
+        -var="aws_region=${TF_VAR_aws_region:-us-east-1}" \
+        -var="aws_access_key_id=${AWS_ACCESS_KEY_ID}" \
+        -var="aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+    - terraform show -json plan.tfplan > plan.json || true
+  variables:
+    # inject fetch script into the job via variable substitution
+    FETCH_CMD: |
+      echo "Fetching secrets from Vault..."
+      (apk --no-cache add curl jq) || (apt-get update && apt-get install -y curl jq) || true
+      if [ -n "$VAULT_ADDR" ]; then
+        resp=$(curl -s -X POST "$VAULT_ADDR/v1/auth/approle/login" -d "{\"role_id\":\"${VAULT_ROLE_ID}\",\"secret_id\":\"${VAULT_SECRET_ID}\"}")
+        token=$(echo "$resp" | jq -r '.auth.client_token // empty')
+        if [ -z "$token" ]; then echo "Vault login failed: $resp" && exit 1; fi
+        export VAULT_TOKEN="$token"
+        secret_json=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/figma-web-matcher/ci")
+        export AWS_ACCESS_KEY_ID=$(echo "$secret_json" | jq -r '.data.data.AWS_ACCESS_KEY_ID // empty')
+        export AWS_SECRET_ACCESS_KEY=$(echo "$secret_json" | jq -r '.data.data.AWS_SECRET_ACCESS_KEY // empty')
+        export TF_PUB_KEY=$(echo "$secret_json" | jq -r '.data.data.TF_PUB_KEY // empty')
+        export TF_VAR_key_name=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_key_name // empty')
+        export TF_VAR_github_repo=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_github_repo // empty')
+        export TF_VAR_app_port=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_app_port // empty')
+        export TF_VAR_aws_region=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_aws_region // empty')
+        echo "$TF_PUB_KEY" > /tmp/deploy_key.pub
+      else
+        echo "VAULT_ADDR not set; skipping Vault fetch"
+      fi
+  artifacts:
+    paths:
+      - plan.tfplan
+      - plan.json
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "qa" || $CI_COMMIT_BRANCH == "prod"'
+      when: on_success
+    - when: never
+
+terraform_apply:
+  stage: apply
+  script:
+    - |
+      # fetch secrets from Vault and export env vars for terraform before apply
+      (apk --no-cache add curl jq) || (apt-get update && apt-get install -y curl jq) || true
+      if [ -n "$VAULT_ADDR" ]; then
+        resp=$(curl -s -X POST "$VAULT_ADDR/v1/auth/approle/login" -d "{\"role_id\":\"${VAULT_ROLE_ID}\",\"secret_id\":\"${VAULT_SECRET_ID}\"}")
+        token=$(echo "$resp" | jq -r '.auth.client_token // empty')
+        if [ -z "$token" ]; then echo "Vault login failed: $resp" && exit 1; fi
+        export VAULT_TOKEN="$token"
+        secret_json=$(curl -s -H "X-Vault-Token: $VAULT_TOKEN" "$VAULT_ADDR/v1/secret/data/figma-web-matcher/ci")
+        export AWS_ACCESS_KEY_ID=$(echo "$secret_json" | jq -r '.data.data.AWS_ACCESS_KEY_ID // empty')
+        export AWS_SECRET_ACCESS_KEY=$(echo "$secret_json" | jq -r '.data.data.AWS_SECRET_ACCESS_KEY // empty')
+        export TF_PUB_KEY=$(echo "$secret_json" | jq -r '.data.data.TF_PUB_KEY // empty')
+        export TF_VAR_key_name=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_key_name // empty')
+        export TF_VAR_github_repo=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_github_repo // empty')
+        export TF_VAR_app_port=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_app_port // empty')
+        export TF_VAR_aws_region=$(echo "$secret_json" | jq -r '.data.data.TF_VAR_aws_region // empty')
+        echo "$TF_PUB_KEY" > /tmp/deploy_key.pub
+      else
+        echo "VAULT_ADDR not set; skipping Vault fetch"
+      fi
+    - terraform init -input=false
+    - terraform apply -input=false -auto-approve \
+        -var="public_key_path=/tmp/deploy_key.pub" \
+        -var="github_repo=${TF_VAR_github_repo}" \
+        -var="key_name=${TF_VAR_key_name}" \
+        -var="app_port=${TF_VAR_app_port:-8000}" \
+        -var="aws_region=${TF_VAR_aws_region:-us-east-1}" \
+        -var="aws_access_key_id=${AWS_ACCESS_KEY_ID}" \
+        -var="aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}"
+    - terraform output -json > tf_outputs.json
+    - cat tf_outputs.json
+    - echo "PUBLIC_IP: $(jq -r '.public_ip.value' tf_outputs.json || true)"
+    - echo "APP_URL: $(jq -r '.app_url.value' tf_outputs.json || true)"
+  artifacts:
+    paths:
+      - tf_outputs.json
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "qa" || $CI_COMMIT_BRANCH == "prod"'
+      when: manual
+    - when: never
