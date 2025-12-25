@@ -42,6 +42,8 @@ terraform_validate:
     - terraform init -input=false
     - terraform validate
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: on_success
     - when: always
 
 terraform_plan:
@@ -89,7 +91,7 @@ terraform_plan:
       - plan.tfplan
       - plan.json
   rules:
-    - if: '$CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "qa" || $CI_COMMIT_BRANCH == "prod"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == "dev" || $CI_COMMIT_BRANCH == "qa" || $CI_COMMIT_BRANCH == "prod"'
       when: on_success
     - when: never
 

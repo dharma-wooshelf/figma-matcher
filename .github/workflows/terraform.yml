@@ -3,6 +3,8 @@ name: Terraform CI
 on:
   push:
     branches: [ "dev", "qa", "prod" ]
+  pull_request:
+    branches: [ "dev", "qa", "prod" ]
   workflow_dispatch:
 
 env:
