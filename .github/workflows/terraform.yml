@@ -1,0 +1,193 @@
+name: Terraform CI
+
+on:
+  push:
+    branches: [ "dev", "qa", "prod" ]
+  pull_request:
+    branches: [ "dev", "qa", "prod" ]
+  workflow_dispatch:
+
+env:
+  TF_DIR: terraform
+
+jobs:
+  validate:
+    name: Terraform validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.7
+
+      - name: Terraform init & validate
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false
+          terraform validate
+
+  plan:
+    name: Terraform plan
+    runs-on: ubuntu-latest
+    needs: validate
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps (curl jq)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+
+      - name: Fetch non-sensitive variables from Terraform Cloud
+        env:
+          TF_CLOUD_TOKEN: ${{ secrets.TF_CLOUD_TOKEN }}
+          TF_CLOUD_ORG: ${{ secrets.TF_CLOUD_ORG }}
+          TF_CLOUD_WORKSPACE: ${{ secrets.TF_CLOUD_WORKSPACE }}
+        run: |
+          if [ -z "$TF_CLOUD_TOKEN" ] || [ -z "$TF_CLOUD_ORG" ] || [ -z "$TF_CLOUD_WORKSPACE" ]; then
+            echo "Terraform Cloud info not provided; skipping workspace variable fetch"
+            exit 0
+          fi
+          # get workspace id
+          ws_json=$(curl -sS -H "Authorization: Bearer $TF_CLOUD_TOKEN" \
+            "https://app.terraform.io/api/v2/organizations/$TF_CLOUD_ORG/workspaces/$TF_CLOUD_WORKSPACE")
+          workspace_id=$(echo "$ws_json" | jq -r '.data.id // empty')
+          if [ -z "$workspace_id" ]; then echo "failed to find workspace" && exit 1; fi
+          # fetch vars; export only non-sensitive values
+          vars_json=$(curl -sS -H "Authorization: Bearer $TF_CLOUD_TOKEN" \
+            "https://app.terraform.io/api/v2/workspaces/$workspace_id/vars")
+          echo "$vars_json" | jq -c '.data[] | {key:.attributes.key, value:.attributes.value, sensitive:.attributes.sensitive}' \
+            | while read -r entry; do
+              key=$(echo "$entry" | jq -r '.key')
+              value=$(echo "$entry" | jq -r '.value')
+              sensitive=$(echo "$entry" | jq -r '.sensitive')
+              if [ "$sensitive" = "false" ] && [ -n "$value" ]; then
+                echo "$key=$value" >> $GITHUB_ENV
+              fi
+            done
+          # if TF_PUB_KEY provided in workspace as non-sensitive, write deploy key
+          if [ -n "${TF_PUB_KEY:-}" ]; then
+            echo "$TF_PUB_KEY" > /tmp/deploy_key.pub
+          fi
+
+      - name: Ensure AWS creds available (fallback to GitHub Secrets)
+        run: |
+          if [ -z "${{ env.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          fi
+          if [ -z "${{ env.AWS_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          fi
+          # write pub key from secret if present
+          if [ -z "$(cat /tmp/deploy_key.pub 2>/dev/null || true)" ] && [ -n "${{ secrets.TF_PUB_KEY }}" ]; then
+            echo "${{ secrets.TF_PUB_KEY }}" > /tmp/deploy_key.pub
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.7
+
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false
+          terraform plan -input=false -out=plan.tfplan \
+            -var="public_key_path=/tmp/deploy_key.pub" \
+            -var="github_repo=${{ env.TF_VAR_github_repo }}" \
+            -var="key_name=${{ env.TF_VAR_key_name }}" \
+            -var="app_port=${{ env.TF_VAR_app_port || '8000' }}" \
+            -var="aws_region=${{ env.TF_VAR_aws_region || 'us-east-1' }}" \
+            -var="aws_access_key_id=${{ env.AWS_ACCESS_KEY_ID }}" \
+            -var="aws_secret_access_key=${{ env.AWS_SECRET_ACCESS_KEY }}"
+          terraform show -json plan.tfplan > plan.json || true
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            ${TF_DIR}/plan.tfplan
+            ${TF_DIR}/plan.json
+
+  apply:
+    name: Terraform apply (manual dispatch)
+    runs-on: ubuntu-latest
+    needs: plan
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps (curl jq)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq
+
+      - name: Fetch non-sensitive variables from Terraform Cloud
+        env:
+          TF_CLOUD_TOKEN: ${{ secrets.TF_CLOUD_TOKEN }}
+          TF_CLOUD_ORG: ${{ secrets.TF_CLOUD_ORG }}
+          TF_CLOUD_WORKSPACE: ${{ secrets.TF_CLOUD_WORKSPACE }}
+        run: |
+          if [ -n "$TF_CLOUD_TOKEN" ] && [ -n "$TF_CLOUD_ORG" ] && [ -n "$TF_CLOUD_WORKSPACE" ]; then
+            ws_json=$(curl -sS -H "Authorization: Bearer $TF_CLOUD_TOKEN" \
+              "https://app.terraform.io/api/v2/organizations/$TF_CLOUD_ORG/workspaces/$TF_CLOUD_WORKSPACE")
+            workspace_id=$(echo "$ws_json" | jq -r '.data.id // empty')
+            if [ -z "$workspace_id" ]; then echo "failed to find workspace" && exit 1; fi
+            vars_json=$(curl -sS -H "Authorization: Bearer $TF_CLOUD_TOKEN" \
+              "https://app.terraform.io/api/v2/workspaces/$workspace_id/vars")
+            echo "$vars_json" | jq -c '.data[] | {key:.attributes.key, value:.attributes.value, sensitive:.attributes.sensitive}' \
+              | while read -r entry; do
+                key=$(echo "$entry" | jq -r '.key')
+                value=$(echo "$entry" | jq -r '.value')
+                sensitive=$(echo "$entry" | jq -r '.sensitive')
+                if [ "$sensitive" = "false" ] && [ -n "$value" ]; then
+                  echo "$key=$value" >> $GITHUB_ENV
+                fi
+              done
+            if [ -n "${TF_PUB_KEY:-}" ]; then
+              echo "$TF_PUB_KEY" > /tmp/deploy_key.pub
+            fi
+          fi
+          if [ -z "$(cat /tmp/deploy_key.pub 2>/dev/null || true)" ] && [ -n "${{ secrets.TF_PUB_KEY }}" ]; then
+            echo "${{ secrets.TF_PUB_KEY }}" > /tmp/deploy_key.pub
+          fi
+          if [ -z "${{ env.AWS_ACCESS_KEY_ID }}" ] && [ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" ]; then
+            echo "AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }}" >> $GITHUB_ENV
+          fi
+          if [ -z "${{ env.AWS_SECRET_ACCESS_KEY }}" ] && [ -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]; then
+            echo "AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" >> $GITHUB_ENV
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.7
+
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init -input=false
+          terraform apply -input=false -auto-approve \
+            -var="public_key_path=/tmp/deploy_key.pub" \
+            -var="github_repo=${{ env.TF_VAR_github_repo }}" \
+            -var="key_name=${{ env.TF_VAR_key_name }}" \
+            -var="app_port=${{ env.TF_VAR_app_port || '8000' }}" \
+            -var="aws_region=${{ env.TF_VAR_aws_region || 'us-east-1' }}" \
+            -var="aws_access_key_id=${{ env.AWS_ACCESS_KEY_ID }}" \
+            -var="aws_secret_access_key=${{ env.AWS_SECRET_ACCESS_KEY }}"
+          terraform output -json > tf_outputs.json
+          cat tf_outputs.json
+          echo "PUBLIC_IP: $(jq -r '.public_ip.value' tf_outputs.json || true)"
+          echo "APP_URL: $(jq -r '.app_url.value' tf_outputs.json || true)"
+
+      - name: Upload outputs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs
+          path: terraform/tf_outputs.json
