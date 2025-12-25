@@ -3,7 +3,7 @@
 
 ## Run Backend
 pip install -r requirements.txt
-uvicorn backend.main:app --reload
+uvicorn backend.main:app --reload 
 
 ## Open UI
 Open frontend/index.html in browser
